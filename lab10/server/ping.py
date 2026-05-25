@@ -50,9 +50,7 @@ def build_packet(seq, pid):
     return header + data
 
 def parse_reply(packet, pid):
-    ip_header = packet[:20]
-    ihl = (ip_header[0] & 0x0F) * 4
-    icmp_header = packet[ihl:ihl + 8]
+    icmp_header = packet[20:28]
     icmp_type, icmp_code, _, recv_pid, recv_seq = struct.unpack("!BBHHH", icmp_header)
 
     if icmp_type == ICMP_ECHO_REPLY and recv_pid == pid:
