@@ -28,6 +28,7 @@ class Router:
             "next_hop": ip,
             "metric": 0
         }
+        self.last_seen = {}
 
     def add_neighbor(self, neighbor_ip, cost):
         self.neighbors[neighbor_ip] = cost
@@ -36,6 +37,7 @@ class Router:
             "next_hop": neighbor_ip,
             "metric": cost
         }
+        self.last_seen[neighbor_ip] = time.time()
 
     def serialize_table(self):
         return {
@@ -71,6 +73,7 @@ class Router:
             packet = json.loads(data.decode())
             source_ip = packet["source"]
             received_table = packet["table"]
+            self.last_seen[source_ip] = time.time()
 
             with self.lock:
                 for destination, info in received_table.items():
@@ -107,6 +110,42 @@ class Router:
                         f"{info['metric']:<10}"
                     )
 
+    def broadcast_update(self, routers):
+        packet = {
+            "source": self.ip,
+            "table": self.serialize_table()
+        }
+        data = json.dumps(packet).encode()
+
+        for neighbor_ip in self.neighbors:
+            neighbor = routers[neighbor_ip]
+            self.sock.sendto(data, ("127.0.0.1", neighbor.port))
+
+    def check_failures(self, routers):
+        while True:
+            time.sleep(1)
+            now = time.time()
+            changed = False
+            with self.lock:
+                dead_neighbors = [
+                    n for n, t in self.last_seen.items()
+                    if now - t > 180
+                ]
+                for dead in dead_neighbors:
+                    if dead in self.neighbors:
+                        del self.neighbors[dead]
+                    to_delete = []
+                    for dest, info in self.routing_table.items():
+                        if info["next_hop"] == dead:
+                            to_delete.append(dest)
+
+                    for dest in to_delete:
+                        self.routing_table[dest]["metric"] = INFINITY
+
+                    changed = True
+            if changed:
+                self.broadcast_update(routers)
+
 
 def generate_random_network(router_count=5):
     routers = {}
@@ -118,19 +157,15 @@ def generate_random_network(router_count=5):
     for i in range(router_count):
         routers[ips[i]] = Router(ips[i], base_port + i)
     for i in range(router_count - 1):
-        cost = random.randint(1, 5)
-        routers[ips[i]].add_neighbor(ips[i + 1], cost)
-        routers[ips[i + 1]].add_neighbor(ips[i], cost)
+        routers[ips[i]].add_neighbor(ips[i + 1], 1)
+        routers[ips[i + 1]].add_neighbor(ips[i], 1)
     extra_edges = router_count
 
     for _ in range(extra_edges):
         a, b = random.sample(ips, 2)
-
         if b not in routers[a].neighbors:
-            cost = random.randint(1, 5)
-
-            routers[a].add_neighbor(b, cost)
-            routers[b].add_neighbor(a, cost)
+            routers[a].add_neighbor(b, 1)
+            routers[b].add_neighbor(a, 1)
 
     return routers
 
@@ -162,6 +197,13 @@ def main():
         t_send.start()
         threads.append(t_recv)
         threads.append(t_send)
+        t_fail = threading.Thread(
+            target=router.check_failures,
+            args=(routers,),
+            daemon=True
+        )
+        t_fail.start()
+        threads.append(t_fail)
 
     simulation_time = 15
 
